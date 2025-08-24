@@ -33,8 +33,7 @@ const couponSchema = new mongoose.Schema({
     time: Number,
     moves: Number,
     status: { type: String, default: 'فعال' },
-    createdAt: { type: Date, default: Date.now },
-    statusChangedAt: { type: Date, default: Date.now } // برای ردیابی زمان تغییر وضعیت
+    createdAt: { type: Date, default: Date.now }
 });
 
 const Coupon = mongoose.model('Coupon', couponSchema);
@@ -50,7 +49,7 @@ async function saveToGoogleSheet(data) {
         const spreadsheetId = '1OwTo9halfAxwBeSs9oqyQyfILLykQKHylU1Sy78fS_8';
         await sheets.spreadsheets.values.append({
             spreadsheetId,
-            range: 'Sheet1!A:J', // اضافه کردن ستون J برای درصد تخفیف
+            range: 'Sheet1!A:J',
             valueInputOption: 'RAW',
             resource: {
                 values: [[
@@ -63,53 +62,13 @@ async function saveToGoogleSheet(data) {
                     data.status,
                     new Date(data.createdAt).toISOString(),
                     data.userId,
-                    data.percent // ستون جدید برای درصد تخفیف
+                    data.percent
                 ]]
             }
         });
         console.log('Data saved to Google Sheet:', data);
     } catch (error) {
         console.error('Error saving to Google Sheet:', error.message, error.stack);
-        throw error;
-    }
-}
-
-// تابع برای حذف ردیف از Google Sheets
-async function deleteFromGoogleSheet(couponId) {
-    try {
-        const auth = new google.auth.GoogleAuth({
-            credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY),
-            scopes: ['https://www.googleapis.com/auth/spreadsheets']
-        });
-        const sheets = google.sheets({ version: 'v4', auth });
-        const spreadsheetId = '1OwTo9halfAxwBeSs9oqyQyfILLykQKHylU1Sy78fS_8';
-        const response = await sheets.spreadsheets.values.get({
-            spreadsheetId,
-            range: 'Sheet1!A:J'
-        });
-        const rows = response.data.values;
-        if (!rows) return;
-        const rowIndex = rows.findIndex(row => row[4] === couponId); // ستون E (couponId)
-        if (rowIndex !== -1) {
-            await sheets.spreadsheets.batchUpdate({
-                spreadsheetId,
-                resource: {
-                    requests: [{
-                        deleteDimension: {
-                            range: {
-                                sheetId: 0,
-                                dimension: 'ROWS',
-                                startIndex: rowIndex,
-                                endIndex: rowIndex + 1
-                            }
-                        }
-                    }]
-                }
-            });
-            console.log(`Row with couponId ${couponId} deleted from Google Sheet`);
-        }
-    } catch (error) {
-        console.error('Error deleting from Google Sheet:', error.message, error.stack);
         throw error;
     }
 }
@@ -128,10 +87,8 @@ app.post('/api/generate-unique-code', async (req, res) => {
         const timePart = Date.now().toString().slice(-4);
         uniqueCode = `RAEES${percent}-${randomPart}${timePart}`;
 
-        // چک کردن یکتایی در MongoDB
         const existingCoupon = await Coupon.findOne({ id: uniqueCode });
         if (!existingCoupon) {
-            // چک کردن یکتایی در Google Sheets
             const auth = new google.auth.GoogleAuth({
                 credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY),
                 scopes: ['https://www.googleapis.com/auth/spreadsheets']
@@ -140,7 +97,7 @@ app.post('/api/generate-unique-code', async (req, res) => {
             const spreadsheetId = '1OwTo9halfAxwBeSs9oqyQyfILLykQKHylU1Sy78fS_8';
             const response = await sheets.spreadsheets.values.get({
                 spreadsheetId,
-                range: 'Sheet1!E:E' // ستون E برای couponId
+                range: 'Sheet1!E:E'
             });
             const rows = response.data.values || [];
             const codeExists = rows.some(row => row[0] === uniqueCode);
@@ -163,7 +120,7 @@ app.post('/api/save-coupon', async (req, res) => {
     try {
         const coupon = new Coupon({
             ...req.body,
-            statusChangedAt: new Date() // تنظیم زمان تغییر وضعیت
+            createdAt: new Date()
         });
         await coupon.save();
         await saveToGoogleSheet({
@@ -189,7 +146,7 @@ app.post('/api/save-coupon', async (req, res) => {
 app.get('/api/get-coupons', async (req, res) => {
     try {
         const { userId } = req.query;
-        const coupons = await Coupon.find({ userId });
+        const coupons = await Coupon.find({ userId, status: 'فعال' }); // فقط کدها با وضعیت فعال
         res.status(200).json(coupons);
     } catch (error) {
         console.error('Error in /api/get-coupons:', error.message, error.stack);
@@ -197,13 +154,13 @@ app.get('/api/get-coupons', async (req, res) => {
     }
 });
 
-// API برای آپدیت وضعیت از Google Sheets
+// API برای آپدیت وضعیت
 app.post('/api/update-coupon-status', async (req, res) => {
     try {
         const { couponId, status } = req.body;
         const coupon = await Coupon.findOneAndUpdate(
             { id: couponId },
-            { status, statusChangedAt: new Date() },
+            { status },
             { new: true }
         );
         if (!coupon) {
@@ -215,30 +172,6 @@ app.post('/api/update-coupon-status', async (req, res) => {
         res.status(500).send({ error: 'Failed to update coupon status', details: error.message });
     }
 });
-
-// Cron Job برای به‌روزرسانی وضعیت به "منقضی شده"
-setInterval(async () => {
-    const now = Date.now();
-    const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
-    await Coupon.updateMany(
-        { status: 'فعال', createdAt: { $lt: sevenDaysAgo } },
-        { status: 'منقضی شده', statusChangedAt: new Date() }
-    );
-}, 24 * 60 * 60 * 1000);
-
-// Cron Job برای حذف کدها
-setInterval(async () => {
-    const now = Date.now();
-    const oneDayAgo = now - 1 * 24 * 60 * 60 * 1000;
-    const couponsToDelete = await Coupon.find({
-        status: { $in: ['استفاده شده', 'منقضی شده'] },
-        statusChangedAt: { $lt: oneDayAgo }
-    });
-    for (const coupon of couponsToDelete) {
-        await deleteFromGoogleSheet(coupon.id);
-        await Coupon.deleteOne({ id: coupon.id });
-    }
-}, 24 * 60 * 60 * 1000);
 
 // همگام‌سازی وضعیت از Google Sheets
 setInterval(async () => {
@@ -260,14 +193,14 @@ setInterval(async () => {
             if (couponId && status) {
                 await Coupon.updateOne(
                     { id: couponId },
-                    { status, statusChangedAt: new Date() }
+                    { status }
                 );
             }
         }
     } catch (error) {
         console.error('Error syncing status from Google Sheet:', error.message, error.stack);
     }
-}, 5 * 60 * 1000); // هر ۵ دقیقه
+}, 5 * 60 * 1000);
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
