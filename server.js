@@ -2,12 +2,13 @@ const express = require('express');
 const mongoose = require('mongoose');
 const { google } = require('googleapis');
 const cors = require('cors');
-const fs = require('fs');
+const fs = require('fs').promises; // استفاده از نسخه promises برای async/await
 const path = require('path');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.static('public')); // سرو فایل‌های استاتیک از پوشه public
 
 // روت پیش‌فرض برای تست
 app.get('/', (req, res) => {
@@ -184,22 +185,31 @@ app.post('/api/update-coupon-status', async (req, res) => {
 });
 
 // API برای گرفتن لیست تصاویر پازل
-app.get('/api/get-puzzle-images', (req, res) => {
+app.get('/api/get-puzzle-images', async (req, res) => {
     try {
         const puzzleDir = path.join(__dirname, 'public', 'images', 'puzzle');
-        fs.readdir(puzzleDir, (err, files) => {
-            if (err) {
-                console.error('Error reading puzzle images directory:', err);
-                return res.status(500).send({ error: 'Failed to read puzzle images' });
-            }
+        console.log('Attempting to read puzzle directory:', puzzleDir); // لاگ برای دیباگ
+        try {
+            const files = await fs.readdir(puzzleDir);
             const imageFiles = files
                 .filter(file => /\.(jpg|jpeg|png)$/i.test(file))
                 .map(file => `images/puzzle/${file}`);
+            if (imageFiles.length === 0) {
+                console.warn('No images found in puzzle directory');
+                return res.status(200).json([]);
+            }
+            console.log('Images found:', imageFiles);
             res.status(200).json(imageFiles);
-        });
+        } catch (err) {
+            if (err.code === 'ENOENT') {
+                console.error('Puzzle directory does not exist:', puzzleDir);
+                return res.status(404).json({ error: 'Puzzle images directory not found' });
+            }
+            throw err;
+        }
     } catch (error) {
         console.error('Error in /api/get-puzzle-images:', error.message, error.stack);
-        res.status(500).send({ error: 'Failed to fetch puzzle images', details: error.message });
+        res.status(500).json({ error: 'Failed to fetch puzzle images', details: error.message });
     }
 });
 
