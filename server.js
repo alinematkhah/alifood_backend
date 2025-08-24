@@ -21,18 +21,18 @@ mongoose.connect(process.env.MONGODB_URI, {
 
 const couponSchema = new mongoose.Schema({
     userId: String,
-    id: String,
-    title: String,
-    type: String,
-    percent: Number,
-    emoji: String,
-    desc: String,
-    expiry: Number,
+    id: { type: String, default: '' },
+    title: { type: String, default: '' },
+    type: { type: String, default: '' },
+    percent: { type: Number, default: 0 },
+    emoji: { type: String, default: '' },
+    desc: { type: String, default: '' },
+    expiry: { type: Number, default: 0 },
     username: String,
     puzzleImage: String,
     time: Number,
     moves: Number,
-    status: { type: String, default: 'فعال' },
+    status: { type: String, default: 'بدون تخفیف' },
     createdAt: { type: Date, default: Date.now }
 });
 
@@ -57,12 +57,12 @@ async function saveToGoogleSheet(data) {
                     data.puzzleImage,
                     data.time,
                     data.moves,
-                    data.couponId,
-                    data.expiryDays,
-                    data.status,
+                    data.couponId || '',
+                    data.expiryDays || 0,
+                    data.status || 'بدون تخفیف',
                     new Date(data.createdAt).toISOString(),
                     data.userId,
-                    data.percent
+                    data.percent || 0
                 ]]
             }
         });
@@ -120,7 +120,15 @@ app.post('/api/save-coupon', async (req, res) => {
     try {
         const coupon = new Coupon({
             ...req.body,
-            createdAt: new Date()
+            createdAt: new Date(),
+            id: req.body.id || '',
+            title: req.body.title || '',
+            type: req.body.type || '',
+            percent: req.body.percent || 0,
+            emoji: req.body.emoji || '',
+            desc: req.body.desc || '',
+            expiry: req.body.expiry || 0,
+            status: req.body.status || 'بدون تخفیف'
         });
         await coupon.save();
         await saveToGoogleSheet({
@@ -128,12 +136,12 @@ app.post('/api/save-coupon', async (req, res) => {
             puzzleImage: req.body.puzzleImage,
             time: req.body.time,
             moves: req.body.moves,
-            couponId: req.body.id,
-            expiryDays: 7,
-            status: 'فعال',
+            couponId: req.body.id || '',
+            expiryDays: req.body.expiryDays || 0,
+            status: req.body.status || 'بدون تخفیف',
             createdAt: req.body.createdAt,
             userId: req.body.userId,
-            percent: req.body.percent
+            percent: req.body.percent || 0
         });
         res.status(201).send({ message: 'Coupon saved' });
     } catch (error) {
