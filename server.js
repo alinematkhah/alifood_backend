@@ -32,7 +32,9 @@ const couponSchema = new mongoose.Schema({
     puzzleImage: String,
     time: Number,
     moves: Number,
-    status: { type: String, default: 'فعال' }
+    status: { type: String, default: 'فعال' },
+    createdAt: { type: Date, default: Date.now },
+    statusChangedAt: { type: Date, default: Date.now } // برای ردیابی زمان تغییر وضعیت
 });
 
 const Coupon = mongoose.model('Coupon', couponSchema);
@@ -44,13 +46,11 @@ async function saveToGoogleSheet(data) {
             credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY),
             scopes: ['https://www.googleapis.com/auth/spreadsheets']
         });
-
         const sheets = google.sheets({ version: 'v4', auth });
-        const spreadsheetId = '1OwTo9halfAxwBeSs9oqyQyfILLykQKHylU1Sy78fS_8'; // Sheet ID شما
-
+        const spreadsheetId = '1OwTo9halfAxwBeSs9oqyQyfILLykQKHylU1Sy78fS_8';
         await sheets.spreadsheets.values.append({
             spreadsheetId,
-            range: 'Sheet1!A:I', // آپدیت‌شده: ستون I برای userId
+            range: 'Sheet1!A:J', // اضافه کردن ستون J برای درصد تخفیف
             valueInputOption: 'RAW',
             resource: {
                 values: [[
@@ -61,8 +61,9 @@ async function saveToGoogleSheet(data) {
                     data.couponId,
                     data.expiryDays,
                     data.status,
-                    new Date().toISOString(),
-                    data.userId // اضافه‌شده برای ستون I
+                    new Date(data.createdAt).toISOString(),
+                    data.userId,
+                    data.percent // ستون جدید برای درصد تخفیف
                 ]]
             }
         });
@@ -73,12 +74,98 @@ async function saveToGoogleSheet(data) {
     }
 }
 
+// تابع برای حذف ردیف از Google Sheets
+async function deleteFromGoogleSheet(couponId) {
+    try {
+        const auth = new google.auth.GoogleAuth({
+            credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY),
+            scopes: ['https://www.googleapis.com/auth/spreadsheets']
+        });
+        const sheets = google.sheets({ version: 'v4', auth });
+        const spreadsheetId = '1OwTo9halfAxwBeSs9oqyQyfILLykQKHylU1Sy78fS_8';
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId,
+            range: 'Sheet1!A:J'
+        });
+        const rows = response.data.values;
+        if (!rows) return;
+        const rowIndex = rows.findIndex(row => row[4] === couponId); // ستون E (couponId)
+        if (rowIndex !== -1) {
+            await sheets.spreadsheets.batchUpdate({
+                spreadsheetId,
+                resource: {
+                    requests: [{
+                        deleteDimension: {
+                            range: {
+                                sheetId: 0,
+                                dimension: 'ROWS',
+                                startIndex: rowIndex,
+                                endIndex: rowIndex + 1
+                            }
+                        }
+                    }]
+                }
+            });
+            console.log(`Row with couponId ${couponId} deleted from Google Sheet`);
+        }
+    } catch (error) {
+        console.error('Error deleting from Google Sheet:', error.message, error.stack);
+        throw error;
+    }
+}
+
+// API تولید کد یکتا
+app.post('/api/generate-unique-code', async (req, res) => {
+    const { percent } = req.body;
+    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    let uniqueCode = '';
+    let isUnique = false;
+    let attempts = 0;
+    const maxAttempts = 100;
+
+    while (!isUnique && attempts < maxAttempts) {
+        const randomPart = Array.from({ length: 4 }, () => letters[Math.floor(Math.random() * letters.length)]).join('');
+        const timePart = Date.now().toString().slice(-4);
+        uniqueCode = `RAEES${percent}-${randomPart}${timePart}`;
+
+        // چک کردن یکتایی در MongoDB
+        const existingCoupon = await Coupon.findOne({ id: uniqueCode });
+        if (!existingCoupon) {
+            // چک کردن یکتایی در Google Sheets
+            const auth = new google.auth.GoogleAuth({
+                credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY),
+                scopes: ['https://www.googleapis.com/auth/spreadsheets']
+            });
+            const sheets = google.sheets({ version: 'v4', auth });
+            const spreadsheetId = '1OwTo9halfAxwBeSs9oqyQyfILLykQKHylU1Sy78fS_8';
+            const response = await sheets.spreadsheets.values.get({
+                spreadsheetId,
+                range: 'Sheet1!E:E' // ستون E برای couponId
+            });
+            const rows = response.data.values || [];
+            const codeExists = rows.some(row => row[0] === uniqueCode);
+            if (!codeExists) {
+                isUnique = true;
+            }
+        }
+        attempts++;
+    }
+
+    if (isUnique) {
+        res.status(200).json({ code: uniqueCode });
+    } else {
+        res.status(500).json({ error: 'Failed to generate unique code after max attempts' });
+    }
+});
+
 // API ذخیره کد
 app.post('/api/save-coupon', async (req, res) => {
     try {
-        const coupon = new Coupon(req.body);
+        const coupon = new Coupon({
+            ...req.body,
+            statusChangedAt: new Date() // تنظیم زمان تغییر وضعیت
+        });
         await coupon.save();
-
         await saveToGoogleSheet({
             username: req.body.username,
             puzzleImage: req.body.puzzleImage,
@@ -87,9 +174,10 @@ app.post('/api/save-coupon', async (req, res) => {
             couponId: req.body.id,
             expiryDays: 7,
             status: 'فعال',
-            userId: req.body.userId
+            createdAt: req.body.createdAt,
+            userId: req.body.userId,
+            percent: req.body.percent
         });
-
         res.status(201).send({ message: 'Coupon saved' });
     } catch (error) {
         console.error('Error in /api/save-coupon:', error.message, error.stack);
@@ -109,26 +197,77 @@ app.get('/api/get-coupons', async (req, res) => {
     }
 });
 
-// API استفاده از کد
-app.delete('/api/redeem-coupon', async (req, res) => {
+// API برای آپدیت وضعیت از Google Sheets
+app.post('/api/update-coupon-status', async (req, res) => {
     try {
-        const { userId, couponId } = req.body;
-        const result = await Coupon.updateOne({ userId, id: couponId }, { status: 'استفاده شده' });
-        if (result.matchedCount === 0) {
+        const { couponId, status } = req.body;
+        const coupon = await Coupon.findOneAndUpdate(
+            { id: couponId },
+            { status, statusChangedAt: new Date() },
+            { new: true }
+        );
+        if (!coupon) {
             return res.status(404).send({ error: 'Coupon not found' });
         }
-        res.status(200).send({ message: 'Coupon redeemed' });
+        res.status(200).send({ message: 'Coupon status updated' });
     } catch (error) {
-        console.error('Error in /api/redeem-coupon:', error.message, error.stack);
-        res.status(500).send({ error: 'Failed to redeem coupon', details: error.message });
+        console.error('Error in /api/update-coupon-status:', error.message, error.stack);
+        res.status(500).send({ error: 'Failed to update coupon status', details: error.message });
     }
 });
+
+// Cron Job برای به‌روزرسانی وضعیت به "منقضی شده"
+setInterval(async () => {
+    const now = Date.now();
+    const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+    await Coupon.updateMany(
+        { status: 'فعال', createdAt: { $lt: sevenDaysAgo } },
+        { status: 'منقضی شده', statusChangedAt: new Date() }
+    );
+}, 24 * 60 * 60 * 1000);
 
 // Cron Job برای حذف کدها
 setInterval(async () => {
     const now = Date.now();
-    await Coupon.deleteMany({ status: { $in: ['استفاده شده', 'منقضی شده'] }, expiry: { $lt: now - 24*60*60*1000 } });
-}, 24*60*60*1000);
+    const oneDayAgo = now - 1 * 24 * 60 * 60 * 1000;
+    const couponsToDelete = await Coupon.find({
+        status: { $in: ['استفاده شده', 'منقضی شده'] },
+        statusChangedAt: { $lt: oneDayAgo }
+    });
+    for (const coupon of couponsToDelete) {
+        await deleteFromGoogleSheet(coupon.id);
+        await Coupon.deleteOne({ id: coupon.id });
+    }
+}, 24 * 60 * 60 * 1000);
+
+// همگام‌سازی وضعیت از Google Sheets
+setInterval(async () => {
+    try {
+        const auth = new google.auth.GoogleAuth({
+            credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY),
+            scopes: ['https://www.googleapis.com/auth/spreadsheets']
+        });
+        const sheets = google.sheets({ version: 'v4', auth });
+        const spreadsheetId = '1OwTo9halfAxwBeSs9oqyQyfILLykQKHylU1Sy78fS_8';
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId,
+            range: 'Sheet1!A:J'
+        });
+        const rows = response.data.values || [];
+        for (const row of rows.slice(1)) { // رد کردن هدر
+            const couponId = row[4]; // ستون E
+            const status = row[6]; // ستون G
+            if (couponId && status) {
+                await Coupon.updateOne(
+                    { id: couponId },
+                    { status, statusChangedAt: new Date() }
+                );
+            }
+        }
+    } catch (error) {
+        console.error('Error syncing status from Google Sheet:', error.message, error.stack);
+    }
+}, 5 * 60 * 1000); // هر ۵ دقیقه
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
