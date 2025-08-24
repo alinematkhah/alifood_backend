@@ -2,6 +2,8 @@ const express = require('express');
 const mongoose = require('mongoose');
 const { google } = require('googleapis');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -21,18 +23,18 @@ mongoose.connect(process.env.MONGODB_URI, {
 
 const couponSchema = new mongoose.Schema({
     userId: String,
-    id: String,
-    title: String,
-    type: String,
-    percent: Number,
-    emoji: String,
-    desc: String,
-    expiry: Number,
+    id: { type: String, default: '' },
+    title: { type: String, default: '' },
+    type: { type: String, default: '' },
+    percent: { type: Number, default: 0 },
+    emoji: { type: String, default: '' },
+    desc: { type: String, default: '' },
+    expiry: { type: Number, default: 0 },
     username: String,
     puzzleImage: String,
     time: Number,
     moves: Number,
-    status: { type: String, default: 'فعال' },
+    status: { type: String, default: 'بدون تخفیف' },
     createdAt: { type: Date, default: Date.now }
 });
 
@@ -57,12 +59,12 @@ async function saveToGoogleSheet(data) {
                     data.puzzleImage,
                     data.time,
                     data.moves,
-                    data.couponId,
-                    data.expiryDays,
-                    data.status,
+                    data.couponId || '',
+                    data.expiryDays || 0,
+                    data.status || 'بدون تخفیف',
                     new Date(data.createdAt).toISOString(),
                     data.userId,
-                    data.percent
+                    data.percent || 0
                 ]]
             }
         });
@@ -115,12 +117,20 @@ app.post('/api/generate-unique-code', async (req, res) => {
     }
 });
 
-// API ذخیره کد
+// API ذخیره پازل تکمیل‌شده (با یا بدون تخفیف)
 app.post('/api/save-coupon', async (req, res) => {
     try {
         const coupon = new Coupon({
             ...req.body,
-            createdAt: new Date()
+            createdAt: new Date(),
+            id: req.body.id || '',
+            title: req.body.title || '',
+            type: req.body.type || '',
+            percent: req.body.percent || 0,
+            emoji: req.body.emoji || '',
+            desc: req.body.desc || '',
+            expiry: req.body.expiry || 0,
+            status: req.body.status || 'بدون تخفیف'
         });
         await coupon.save();
         await saveToGoogleSheet({
@@ -128,12 +138,12 @@ app.post('/api/save-coupon', async (req, res) => {
             puzzleImage: req.body.puzzleImage,
             time: req.body.time,
             moves: req.body.moves,
-            couponId: req.body.id,
-            expiryDays: 7,
-            status: 'فعال',
+            couponId: req.body.id || '',
+            expiryDays: req.body.expiryDays || 0,
+            status: req.body.status || 'بدون تخفیف',
             createdAt: req.body.createdAt,
             userId: req.body.userId,
-            percent: req.body.percent
+            percent: req.body.percent || 0
         });
         res.status(201).send({ message: 'Coupon saved' });
     } catch (error) {
@@ -170,6 +180,26 @@ app.post('/api/update-coupon-status', async (req, res) => {
     } catch (error) {
         console.error('Error in /api/update-coupon-status:', error.message, error.stack);
         res.status(500).send({ error: 'Failed to update coupon status', details: error.message });
+    }
+});
+
+// API برای گرفتن لیست تصاویر پازل
+app.get('/api/get-puzzle-images', (req, res) => {
+    try {
+        const puzzleDir = path.join(__dirname, 'public', 'images', 'puzzle');
+        fs.readdir(puzzleDir, (err, files) => {
+            if (err) {
+                console.error('Error reading puzzle images directory:', err);
+                return res.status(500).send({ error: 'Failed to read puzzle images' });
+            }
+            const imageFiles = files
+                .filter(file => /\.(jpg|jpeg|png)$/i.test(file))
+                .map(file => `images/puzzle/${file}`);
+            res.status(200).json(imageFiles);
+        });
+    } catch (error) {
+        console.error('Error in /api/get-puzzle-images:', error.message, error.stack);
+        res.status(500).send({ error: 'Failed to fetch puzzle images', details: error.message });
     }
 });
 
